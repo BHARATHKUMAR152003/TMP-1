@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Node + Express)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: printpress
+          POSTGRES_USER: postgres
+          POSTGRES_DB: printpress
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    env:
+      NODE_ENV: test
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: printpress
+      DB_NAME: printpress
+      JWT_SECRET: ci_test_secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply schema and upgrades
+        run: npm run migrate
+
+      - name: Seed demo data
+        run: npm run seed
+
+      - name: Smoke test the API
+        run: |
+          npm start &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5000/api/v1/health && break
+            sleep 2
+          done
+          curl -sf http://localhost:5000/api/v1/health
+          TOKEN=$(curl -sf -X POST http://localhost:5000/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@printpress.com","password":"password123"}' \
+            | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).data.token))")
+          curl -sf http://localhost:5000/api/v1/dashboard/admin -H "Authorization: Bearer $TOKEN" > /dev/null
+          curl -sf http://localhost:5000/api/v1/orders -H "Authorization: Bearer $TOKEN" > /dev/null
+
+  frontend:
+    name: Frontend (React + Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build

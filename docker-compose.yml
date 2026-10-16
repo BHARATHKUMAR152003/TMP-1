@@ -1,0 +1,49 @@
+# Single-host deployment: PostgreSQL + one Node.js container that serves the
+# React SPA, the REST API and /uploads on the same origin.
+#
+#   docker compose up -d --build
+#
+# The whole app is exposed on http://localhost:3001. Override secrets via a
+# .env file next to this compose file.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-printpress}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_DB: ${DB_NAME:-printpress}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-printpress}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-printpress}
+      DB_NAME: ${DB_NAME:-printpress}
+      NODE_ENV: production
+      PORT: "5000"
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
+      SEED_ON_START: "${SEED_ON_START:-true}"
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "3001:5000"
+
+volumes:
+  db_data:
+  uploads:

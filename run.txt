@@ -1,0 +1,1 @@
+ C:\Users\A552440\node20\node.exe --env-file="C:\Users\A552440\Desktop\Press 1234\backend\.env" "C:\Users\A552440\Desktop\Press 1234\backend\src\server.js"
