@@ -75,7 +75,7 @@ async function upgrade(client) {
     'UPDATE orders SET amount_due = balance_amount WHERE amount_due = 0 AND balance_amount <> 0'
   );
 
-  await upgradeRoles(client);
+  //await upgradeRoles(client);
   await upgradeInvoicing(client);
   await upgradeBillingAndPayments(client);
   await upgradeWastageAndDelivery(client);
