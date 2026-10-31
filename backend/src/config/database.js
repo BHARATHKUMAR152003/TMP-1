@@ -1,20 +1,24 @@
+
 import pg from 'pg';
 import config from './index.js';
 import logger from './logger.js';
 
-// COUNT()/SUM(bigint) arrive as strings by default; return real numbers so the
-// dashboard aggregates serialise as JSON numbers.
-pg.types.setTypeParser(pg.types.builtins.INT8, (value) => Number(value));
+// Convert PostgreSQL BIGINT values into JavaScript numbers.
+pg.types.setTypeParser(
+  pg.types.builtins.INT8,
+  (value) => Number(value)
+);
 
-// DATE columns (order_date, payment_date, invoice_date) are calendar dates, not
-// instants. Left to the driver they become JS Dates at local midnight, which
-// JSON-serialise back a day earlier in any timezone east of UTC — an invoice
-// dated 15-Aug would print as 14-Aug. Keep them as plain 'YYYY-MM-DD' strings.
-pg.types.setTypeParser(pg.types.builtins.DATE, (value) => value);
+// Preserve DATE values as YYYY-MM-DD strings.
+// Prevents timezone-related invoice date changes.
+pg.types.setTypeParser(
+  pg.types.builtins.DATE,
+  (value) => value
+);
 
 /**
- * Shared PostgreSQL connection pool. Prefer the `query`/`insert` helpers below
- * so every statement stays parameterised and safe from SQL injection.
+ * Shared PostgreSQL connection pool.
+ * Compatible with Supabase PostgreSQL Session Pooler.
  */
 export const pool = new pg.Pool({
   host: config.db.host,
@@ -22,73 +26,144 @@ export const pool = new pg.Pool({
   user: config.db.user,
   password: config.db.password,
   database: config.db.database,
+
   max: config.db.connectionLimit,
-  ssl: config.db.ssl ? { rejectUnauthorized: config.db.sslRejectUnauthorized } : false,
+
+  // Supabase PostgreSQL SSL.
+  ssl: config.db.ssl
+    ? {
+        rejectUnauthorized: config.db.sslRejectUnauthorized,
+      }
+    : false,
+
+  // Connection management.
+  connectionTimeoutMillis: 15000,
+  idleTimeoutMillis: 30000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
+// Log unexpected connection pool errors.
 pool.on('error', (error) => {
-  logger.error('Unexpected PostgreSQL client error', { stack: error.stack });
+  logger.error('Unexpected PostgreSQL client error', {
+    stack: error.stack,
+  });
 });
 
 /**
- * Rewrites `?` placeholders to PostgreSQL's `$1..$n`. Statements are written
- * with `?` throughout the service layer so the SQL stays compact and readable.
+ * Convert ? placeholders to PostgreSQL $1, $2, etc.
  */
 function toPositional(sql) {
   let index = 0;
-  return sql.replace(/\?/g, () => `$${(index += 1)}`);
-}
 
-/** Runs a query and returns the rows. `client` scopes it to a transaction. */
-export async function query(sql, params = [], client = pool) {
-  const result = await client.query(toPositional(sql), params);
-  return result.rows;
-}
-
-/** Runs an INSERT and returns the generated id. */
-export async function insert(sql, params = [], client = pool) {
-  const rows = await query(`${sql} RETURNING id`, params, client);
-  return rows[0]?.id ?? null;
-}
-
-/** Runs a statement and returns how many rows it affected. */
-export async function execute(sql, params = [], client = pool) {
-  const result = await client.query(toPositional(sql), params);
-  return result.rowCount;
-}
-
-/** Verifies the database is reachable at startup. */
-export async function verifyConnection() {
-  const client = await pool.connect();
-  try {
-    await client.query('SELECT 1');
-    logger.info(`PostgreSQL connected -> ${config.db.host}:${config.db.port}/${config.db.database}`);
-  } finally {
-    client.release();
-  }
+  return sql.replace(/\?/g, () => `$${++index}`);
 }
 
 /**
- * Runs a set of statements inside a single transaction. The callback receives a
- * dedicated client; commit/rollback are handled automatically.
+ * Execute parameterized SQL query.
  */
-export async function withTransaction(callback) {
+export async function query(sql, params = [], client = pool) {
+  const result = await client.query(
+    toPositional(sql),
+    params
+  );
+
+  return result.rows;
+}
+
+/**
+ * Insert a record and return its generated ID.
+ */
+export async function insert(sql, params = [], client = pool) {
+  const rows = await query(
+    `${sql} RETURNING id`,
+    params,
+    client
+  );
+
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Execute INSERT, UPDATE or DELETE.
+ * Return affected row count.
+ */
+export async function execute(sql, params = [], client = pool) {
+  const result = await client.query(
+    toPositional(sql),
+    params
+  );
+
+  return result.rowCount;
+}
+
+/**
+ * Verify Supabase PostgreSQL connectivity.
+ */
+export async function verifyConnection() {
   const client = await pool.connect();
+
   try {
-    await client.query('BEGIN');
-    const result = await callback(client);
-    await client.query('COMMIT');
-    return result;
+    const result = await client.query(
+      'SELECT current_database() AS database, NOW() AS server_time'
+    );
+
+    logger.info(
+      `PostgreSQL connected successfully: ${config.db.host}`
+    );
+
+    logger.info(
+      `Database: ${result.rows[0].database}`
+    );
+
+    return true;
   } catch (error) {
-    await client.query('ROLLBACK');
+    logger.error('PostgreSQL connection verification failed', {
+      stack: error.stack,
+    });
+
     throw error;
   } finally {
     client.release();
   }
 }
 
+/**
+ * Execute multiple queries inside one transaction.
+ */
+export async function withTransaction(callback) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await callback(client);
+
+    await client.query('COMMIT');
+
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      logger.error('Transaction rollback failed', {
+        stack: rollbackError.stack,
+      });
+    }
+
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Gracefully close PostgreSQL connection pool.
+ */
 export async function closePool() {
   await pool.end();
+
+  logger.info('PostgreSQL connection pool closed.');
 }
 
 export default pool;
