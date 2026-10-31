@@ -1,3 +1,4 @@
+
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,22 +27,31 @@ async function addColumn(client, table, column, definition) {
 }
 
 /**
- * Idempotent upgrades for databases created by an earlier schema revision (or
- * by the previous Django backend). Each step is safe to re-run and none of them
- * deletes rows — historical data is always preserved.
+ * Idempotent upgrades for databases created by an earlier schema revision.
+ * Historical data is preserved.
  */
 async function upgrade(client) {
-  // Roles and statuses are plain VARCHARs so new values need no further DDL.
-  await client.query("ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(20), ALTER COLUMN role SET DEFAULT 'accountant'");
-  await client.query("ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(30), ALTER COLUMN status SET DEFAULT 'new'");
-  await client.query("ALTER TABLE orders ALTER COLUMN source TYPE VARCHAR(20), ALTER COLUMN source SET DEFAULT 'counter'");
-  await client.query("ALTER TABLE orders ALTER COLUMN priority TYPE VARCHAR(10), ALTER COLUMN priority SET DEFAULT 'normal'");
+  await client.query(
+    "ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(20), ALTER COLUMN role SET DEFAULT 'accountant'"
+  );
+
+  await client.query(
+    "ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(30), ALTER COLUMN status SET DEFAULT 'new'"
+  );
+
+  await client.query(
+    "ALTER TABLE orders ALTER COLUMN source TYPE VARCHAR(20), ALTER COLUMN source SET DEFAULT 'counter'"
+  );
+
+  await client.query(
+    "ALTER TABLE orders ALTER COLUMN priority TYPE VARCHAR(10), ALTER COLUMN priority SET DEFAULT 'normal'"
+  );
+
   await client.query('ALTER TABLE orders ALTER COLUMN order_number DROP NOT NULL');
 
-  // Django's auth columns are NOT NULL without a default; give them one so
-  // inserts from this backend succeed on an existing database.
   await addColumn(client, 'users', 'is_staff', 'is_staff BOOLEAN NOT NULL DEFAULT FALSE');
   await addColumn(client, 'users', 'is_superuser', 'is_superuser BOOLEAN NOT NULL DEFAULT FALSE');
+
   await client.query('ALTER TABLE users ALTER COLUMN is_staff SET DEFAULT FALSE');
   await client.query('ALTER TABLE users ALTER COLUMN is_superuser SET DEFAULT FALSE');
 
@@ -57,14 +67,13 @@ async function upgrade(client) {
 
   await addColumn(client, 'notifications', 'target_role', 'target_role VARCHAR(40)');
 
-  // Inventory moved from a free-text category to the group/category/type
-  // taxonomy. Any legacy column is kept (data is not discarded) but unused.
   await addColumn(client, 'inventory', 'group_id', 'group_id INTEGER REFERENCES inventory_groups (id) ON DELETE SET NULL');
   await addColumn(client, 'inventory', 'category_id', 'category_id INTEGER REFERENCES inventory_categories (id) ON DELETE SET NULL');
   await addColumn(client, 'inventory', 'type_id', 'type_id INTEGER REFERENCES inventory_types (id) ON DELETE SET NULL');
 
-  // amount_due mirrors balance_amount for rows written before it existed.
-  await client.query('UPDATE orders SET amount_due = balance_amount WHERE amount_due = 0 AND balance_amount <> 0');
+  await client.query(
+    'UPDATE orders SET amount_due = balance_amount WHERE amount_due = 0 AND balance_amount <> 0'
+  );
 
   await upgradeRoles(client);
   await upgradeInvoicing(client);
@@ -74,6 +83,7 @@ async function upgrade(client) {
 
   for (const table of TIMESTAMPED_TABLES) {
     await client.query(`DROP TRIGGER IF EXISTS trg_${table}_updated_at ON ${table}`);
+
     await client.query(
       `CREATE TRIGGER trg_${table}_updated_at BEFORE UPDATE ON ${table}
        FOR EACH ROW EXECUTE FUNCTION set_updated_at()`,
@@ -82,37 +92,54 @@ async function upgrade(client) {
 }
 
 /**
- * Two-role simplification. Managers become admins (same access they had);
- * every other retired role is DEACTIVATED, never deleted, so historical
- * created_by / recorded_by references and customer records stay intact.
+ * Two-role simplification.
+ * Managers become admins; retired roles are deactivated, not deleted.
  */
 async function upgradeRoles(client) {
-  const promoted = await client.query("UPDATE users SET role = 'admin' WHERE role = 'manager'");
-  if (promoted.rowCount) logger.info(`  ~ ${promoted.rowCount} manager account(s) promoted to admin`);
+  const promoted = await client.query(
+    "UPDATE users SET role = 'admin' WHERE role = 'manager'"
+  );
+
+  if (promoted.rowCount) {
+    logger.info(`  ~ ${promoted.rowCount} manager account(s) promoted to admin`);
+  }
 
   const retired = await client.query(
     `UPDATE users SET is_active = FALSE
      WHERE role NOT IN ('admin', 'accountant') AND is_active = TRUE`,
   );
+
   if (retired.rowCount) {
-    logger.info(`  ~ ${retired.rowCount} account(s) with retired roles deactivated (not deleted)`);
+    logger.info(
+      `  ~ ${retired.rowCount} account(s) with retired roles deactivated`
+    );
   }
 
-  // Old production/delivery statuses are closed out so they stop appearing in
-  // the working queues. Cancelled and rejected rows keep their outcome.
   const closed = await client.query(
     `UPDATE orders SET status = 'completed'
      WHERE status IN ('accountant_approved','designing','design_approved','plate_making',
                       'printing','cutting','finishing','ready_for_delivery',
                       'out_for_delivery','delivered','on_hold')`,
   );
-  if (closed.rowCount) logger.info(`  ~ ${closed.rowCount} in-production order(s) marked completed`);
-  await client.query("UPDATE orders SET status = 'cancelled' WHERE status = 'rejected'");
-  await client.query("UPDATE orders SET payment_status = 'unpaid' WHERE payment_status = 'rejected'");
-  await client.query("UPDATE orders SET source = 'counter' WHERE source IN ('customer','designer')");
+
+  if (closed.rowCount) {
+    logger.info(`  ~ ${closed.rowCount} in-production order(s) marked completed`);
+  }
+
+  await client.query(
+    "UPDATE orders SET status = 'cancelled' WHERE status = 'rejected'"
+  );
+
+  await client.query(
+    "UPDATE orders SET payment_status = 'unpaid' WHERE payment_status = 'rejected'"
+  );
+
+  await client.query(
+    "UPDATE orders SET source = 'counter' WHERE source IN ('customer','designer')"
+  );
 }
 
-/** Invoice numbering: TMP/NNNN/YY-YY plus its financial-year sequence table. */
+/** Invoice numbering: TMP/NNNN/YY-YY plus financial-year sequence. */
 async function upgradeInvoicing(client) {
   await client.query('ALTER TABLE orders ALTER COLUMN order_number TYPE VARCHAR(40)');
   await client.query('ALTER TABLE bills ALTER COLUMN bill_number TYPE VARCHAR(40)');
@@ -125,11 +152,10 @@ async function upgradeInvoicing(client) {
   await addColumn(client, 'orders', 'order_date', 'order_date DATE');
   await addColumn(client, 'orders', 'is_historical', 'is_historical BOOLEAN NOT NULL DEFAULT FALSE');
 
-  // Back-fill the document date from created_at for pre-existing orders.
-  await client.query('UPDATE orders SET order_date = created_at::date WHERE order_date IS NULL');
+  await client.query(
+    'UPDATE orders SET order_date = created_at::date WHERE order_date IS NULL'
+  );
 
-  // Derive financial_year / invoice_seq for rows that already carry a
-  // TMP/NNNN/YY-YY number (e.g. re-running the migration after an import).
   await client.query(
     `UPDATE orders
      SET financial_year = split_part(order_number, '/', 3),
@@ -144,8 +170,6 @@ async function upgradeInvoicing(client) {
        WHERE financial_year IS NOT NULL AND invoice_seq IS NOT NULL`,
   );
 
-  // Seed each counter past the highest number already in use so a fresh
-  // reservation can never collide with an existing (or imported) invoice.
   await client.query(
     `INSERT INTO invoice_sequences (prefix, financial_year, last_number)
      SELECT split_part(order_number, '/', 1), financial_year, MAX(invoice_seq)
@@ -157,17 +181,23 @@ async function upgradeInvoicing(client) {
   );
 }
 
-/** Tax breakdown on bills, payment reference/history columns, buyer state. */
+/** Tax breakdown, payment history and buyer state. */
 async function upgradeBillingAndPayments(client) {
   await addColumn(client, 'bills', 'invoice_date', 'invoice_date DATE');
   await addColumn(client, 'bills', 'gst_rate', 'gst_rate NUMERIC(5,2) NOT NULL DEFAULT 18');
   await addColumn(client, 'bills', 'cgst_amount', 'cgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0');
   await addColumn(client, 'bills', 'sgst_amount', 'sgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0');
-  await client.query('UPDATE bills SET invoice_date = created_at::date WHERE invoice_date IS NULL');
+
+  await client.query(
+    'UPDATE bills SET invoice_date = created_at::date WHERE invoice_date IS NULL'
+  );
 
   await addColumn(client, 'payments', 'reference_no', 'reference_no VARCHAR(120)');
   await addColumn(client, 'payments', 'is_historical', 'is_historical BOOLEAN NOT NULL DEFAULT FALSE');
-  await client.query('UPDATE payments SET payment_date = created_at::date WHERE payment_date IS NULL');
+
+  await client.query(
+    'UPDATE payments SET payment_date = created_at::date WHERE payment_date IS NULL'
+  );
 
   await addColumn(client, 'customers', 'state', 'state VARCHAR(80)');
   await addColumn(client, 'customers', 'state_code', 'state_code VARCHAR(4)');
@@ -178,11 +208,7 @@ async function upgradeBillingAndPayments(client) {
   await client.query('CREATE INDEX IF NOT EXISTS idx_payments_date ON payments (payment_date)');
 }
 
-/**
- * Delivery charge on the invoice and the stock booked as wastage against a job.
- * The FK lives here rather than in schema.sql because `orders` is created
- * before `inventory`.
- */
+/** Delivery charge and wastage tracking. */
 async function upgradeWastageAndDelivery(client) {
   await addColumn(client, 'orders', 'delivery_charge', 'delivery_charge NUMERIC(12,2) NOT NULL DEFAULT 0');
   await addColumn(client, 'orders', 'wastage_item_id', 'wastage_item_id INTEGER');
@@ -200,54 +226,35 @@ async function upgradeWastageAndDelivery(client) {
     END $$;
   `);
 
-  await client.query('CREATE INDEX IF NOT EXISTS idx_orders_wastage_item ON orders (wastage_item_id)');
+  await client.query(
+    'CREATE INDEX IF NOT EXISTS idx_orders_wastage_item ON orders (wastage_item_id)'
+  );
 }
 
-/** Cutting charge billed alongside delivery, and the dispatch carrier for the invoice. */
+/** Cutting charge and dispatch carrier. */
 async function upgradeCuttingAndDispatch(client) {
   await addColumn(client, 'orders', 'cutting_charge', 'cutting_charge NUMERIC(12,2) NOT NULL DEFAULT 0');
   await addColumn(client, 'orders', 'dispatched_through', 'dispatched_through VARCHAR(120)');
 }
 
-
-
-/** Creates the database if it does not exist yet. */
-async function ensureDatabase(fresh) {
-  // 'postgres' is the maintenance database; CREATE DATABASE cannot run inside
-  // the database being created.
-  const admin = new pg.Client({
-    host: config.db.host,
-    port: config.db.port,
-    user: config.db.user,
-    password: config.db.password,
-    database: 'postgres',
-  });
-  await admin.connect();
-  try {
-    if (fresh) {
-      logger.warn(`Dropping database "${config.db.database}" (--fresh)`);
-      await admin.query(`DROP DATABASE IF EXISTS "${config.db.database}"`);
-    }
-    const { rows } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [config.db.database]);
-    if (rows.length === 0) {
-      await admin.query(`CREATE DATABASE "${config.db.database}"`);
-      logger.info(`Created database "${config.db.database}"`);
-    }
-  } finally {
-    await admin.end();
-  }
-}
-
 /**
- * Creates the database (if missing) and applies schema.sql. Pass `--fresh` to
- * drop and recreate the database from scratch.
+ * Supabase-compatible migration.
  *
- *   npm run migrate            # create + apply schema + upgrade
- *   node src/database/migrate.js --fresh
+ * Supabase creates and manages the PostgreSQL database.
+ * This script only applies schema.sql and schema upgrades.
+ *
+ * Usage:
+ *   npm run migrate
+ *
+ * Destructive database resets are intentionally disabled.
  */
 async function migrate() {
-  const fresh = process.argv.includes('--fresh');
-  await ensureDatabase(fresh);
+  if (process.argv.includes('--fresh')) {
+    throw new Error(
+      'Fresh database reset is disabled. ' +
+      'Use a separate development database for destructive resets.'
+    );
+  }
 
   const client = new pg.Client({
     host: config.db.host,
@@ -255,17 +262,35 @@ async function migrate() {
     user: config.db.user,
     password: config.db.password,
     database: config.db.database,
+    ssl: config.db.ssl
+      ? { rejectUnauthorized: config.db.sslRejectUnauthorized }
+      : false,
+    connectionTimeoutMillis: 15000,
   });
+
+  logger.info(
+    `Connecting to PostgreSQL database "${config.db.database}"...`
+  );
+
   await client.connect();
 
   try {
-    const schema = await fs.readFile(path.join(__dirname, 'schema.sql'), 'utf8');
+    const schema = await fs.readFile(
+      path.join(__dirname, 'schema.sql'),
+      'utf8'
+    );
+
+    logger.info('Applying database schema...');
+
     await client.query(schema);
 
-    logger.info('Applying idempotent upgrades...');
+    logger.info('Applying idempotent database upgrades...');
+
     await upgrade(client);
 
-    logger.info(`Migration complete on "${config.db.database}"`);
+    logger.info(
+      `Migration completed successfully on "${config.db.database}"`
+    );
   } finally {
     await client.end();
   }
