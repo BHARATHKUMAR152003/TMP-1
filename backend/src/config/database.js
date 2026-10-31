@@ -17,6 +17,26 @@ pg.types.setTypeParser(
 );
 
 /**
+ * Load the Supabase CA certificate.
+ *
+ * DB_SSL_CA_BASE64 must contain the Base64-encoded
+ * contents of the Supabase CA certificate (PEM file).
+ */
+const supabaseCa = process.env.DB_SSL_CA_BASE64
+  ? Buffer.from(
+      process.env.DB_SSL_CA_BASE64.trim(),
+      'base64'
+    ).toString('utf8')
+  : undefined;
+
+// Validate the certificate if supplied.
+if (supabaseCa && !supabaseCa.includes('-----BEGIN CERTIFICATE-----')) {
+  throw new Error(
+    'DB_SSL_CA_BASE64 does not contain a valid PEM certificate.'
+  );
+}
+
+/**
  * Shared PostgreSQL connection pool.
  * Compatible with Supabase PostgreSQL Session Pooler.
  */
@@ -30,9 +50,11 @@ export const pool = new pg.Pool({
   max: config.db.connectionLimit,
 
   // Supabase PostgreSQL SSL.
+  // Certificate verification remains enabled.
   ssl: config.db.ssl
     ? {
         rejectUnauthorized: config.db.sslRejectUnauthorized,
+        ...(supabaseCa ? { ca: supabaseCa } : {}),
       }
     : false,
 
